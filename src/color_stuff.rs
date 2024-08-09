@@ -186,42 +186,26 @@ impl Chromaticities {
     // http://www.brucelindbloom.com/index.html?Eqn_RGB_XYZ_Matrix.html
     /// Use this matrix to go from RGB values to CIE XYZ values. This matrix goes first in multiplication order
     pub fn rgb_to_xyz_matrix(&self) -> Matrix3x3f {
-        fn intermediaries(coords: CIExyCoords) -> (f32, f32, f32) {
-            let xx = coords.x / coords.y;
-            let yy = 1.0;
-            let zz = (1.0 - coords.x - coords.y) / coords.y;
+        let red: CIEXYZCoords = CIExyYCoords { coords: self.red, luma: 1.0 }.into();
+        let green: CIEXYZCoords = CIExyYCoords { coords: self.green, luma: 1.0 }.into();
+        let blue: CIEXYZCoords = CIExyYCoords { coords: self.blue, luma: 1.0 }.into();
+        let white: CIEXYZCoords = CIExyYCoords { coords: self.white, luma: 1.0 }.into();
 
-            (xx, yy, zz)
-        }
-
-        let (x_r, y_r, z_r) = intermediaries(self.red);
-        let (x_g, y_g, z_g) = intermediaries(self.green);
-        let (x_b, y_b, z_b) = intermediaries(self.blue);
-
-        let (x_w, y_w, z_w) = (
-            self.white.x / self.white.y,
-            1.0,
-            (1.0 - (self.white.x + self.white.y)) / self.white.y,
-        );
-
-        let middle = Matrix3x3f::new(x_r, x_g, x_b, y_r, y_g, y_b, z_r, z_g, z_b)
-            .try_inverse()
-            .unwrap();
-        let s_coefficients = middle * Matrix3x1f::new(x_w, y_w, z_w);
+        let s_coefficients = Matrix3x3f::new(red.x, green.x, blue.x, red.y, green.y, blue.y, red.z, green.z, blue.z).try_inverse().unwrap() * Matrix3x1f::from(white);
         let s_r = s_coefficients[(0, 0)];
         let s_g = s_coefficients[(1, 0)];
         let s_b = s_coefficients[(2, 0)];
 
         Matrix3x3f::new(
-            s_r * x_r,
-            s_g * x_g,
-            s_b * x_b,
-            s_r * y_r,
-            s_g * y_g,
-            s_b * y_b,
-            s_r * z_r,
-            s_g * z_g,
-            s_b * z_b,
+            s_r * red.x,
+            s_g * green.x,
+            s_b * blue.x,
+            s_r * red.y,
+            s_g * green.y,
+            s_b * blue.y,
+            s_r * red.z,
+            s_g * green.z,
+            s_b * blue.z,
         )
     }
 
