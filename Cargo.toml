@@ -1,0 +1,10 @@
+[package]
+name = "exr_read"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.14", features = ["derive"] }
+exr = "1.72.0"
+nalgebra = "0.33.0"
+png = "0.17.13"
