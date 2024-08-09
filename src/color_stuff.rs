@@ -45,6 +45,13 @@ pub struct CIExyCoords {
     pub y: f32,
 }
 
+impl CIExyCoords {
+    /// Effectively add luma and turn these coordinates into xyY
+    pub fn with_luma(self, luma: f32) -> CIExyYCoords {
+        CIExyYCoords { coords: self, luma }
+    }
+}
+
 impl From<Vec2<f32>> for CIExyCoords {
     fn from(value: Vec2<f32>) -> Self {
         Self {
@@ -70,10 +77,7 @@ impl CIEXYZCoords {
         // Handle pure black
         if (self.x < f32::EPSILON) & (self.y < f32::EPSILON) & (self.z < f32::EPSILON) {
             // If pure black, return white point with zero luma
-            return CIExyYCoords {
-                coords: illuminant,
-                luma: 0.0,
-            };
+            return illuminant.with_luma(0.0);
         }
 
         CIExyYCoords {
@@ -190,26 +194,10 @@ impl Chromaticities {
     // http://www.brucelindbloom.com/index.html?Eqn_RGB_XYZ_Matrix.html
     /// Use this matrix to go from RGB values to CIE XYZ values. This matrix goes first in multiplication order
     pub fn rgb_to_xyz_matrix(&self) -> Option<Matrix3x3f> {
-        let red: CIEXYZCoords = CIExyYCoords {
-            coords: self.red,
-            luma: 1.0,
-        }
-        .into();
-        let green: CIEXYZCoords = CIExyYCoords {
-            coords: self.green,
-            luma: 1.0,
-        }
-        .into();
-        let blue: CIEXYZCoords = CIExyYCoords {
-            coords: self.blue,
-            luma: 1.0,
-        }
-        .into();
-        let white: CIEXYZCoords = CIExyYCoords {
-            coords: self.white,
-            luma: 1.0,
-        }
-        .into();
+        let red: CIEXYZCoords = self.red.with_luma(1.0).into();
+        let green: CIEXYZCoords = self.green.with_luma(1.0).into();
+        let blue: CIEXYZCoords = self.blue.with_luma(1.0).into();
+        let white: CIEXYZCoords = self.white.with_luma(1.0).into();
 
         let s_coefficients = Matrix3x3f::new(
             red.x, green.x, blue.x, red.y, green.y, blue.y, red.z, green.z, blue.z,
