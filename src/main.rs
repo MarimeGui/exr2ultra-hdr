@@ -77,7 +77,8 @@ fn main() {
     // Convert to desired color space
     if let Some(output_chromaticities) = args.output_chromaticities {
         let conversion_matrix = input_chromaticities
-            .rgb_space_conversion_matrix(&output_chromaticities.chromaticities());
+            .rgb_space_conversion_matrix(&output_chromaticities.chromaticities())
+            .unwrap();
         for pixel in &mut linear_light {
             let v: Matrix3x1f = (*pixel).into();
             *pixel = (conversion_matrix * v).into()
@@ -112,5 +113,4 @@ fn main() {
     writer.write_image_data(&image_data).unwrap()
 }
 
-// TODO: Option to convert from Color space to another
 // TODO: How to embed an ICC profile with my own chromaticities ?

@@ -22,7 +22,11 @@ pub struct Pixel {
 
 impl From<Matrix3x1f> for Pixel {
     fn from(value: Matrix3x1f) -> Self {
-        Self { r: value[(0, 0)], g: value[(1, 0)], b: value[(2, 0)] }
+        Self {
+            r: value[(0, 0)],
+            g: value[(1, 0)],
+            b: value[(2, 0)],
+        }
     }
 }
 
@@ -185,18 +189,38 @@ impl From<png::SourceChromaticities> for Chromaticities {
 impl Chromaticities {
     // http://www.brucelindbloom.com/index.html?Eqn_RGB_XYZ_Matrix.html
     /// Use this matrix to go from RGB values to CIE XYZ values. This matrix goes first in multiplication order
-    pub fn rgb_to_xyz_matrix(&self) -> Matrix3x3f {
-        let red: CIEXYZCoords = CIExyYCoords { coords: self.red, luma: 1.0 }.into();
-        let green: CIEXYZCoords = CIExyYCoords { coords: self.green, luma: 1.0 }.into();
-        let blue: CIEXYZCoords = CIExyYCoords { coords: self.blue, luma: 1.0 }.into();
-        let white: CIEXYZCoords = CIExyYCoords { coords: self.white, luma: 1.0 }.into();
+    pub fn rgb_to_xyz_matrix(&self) -> Option<Matrix3x3f> {
+        let red: CIEXYZCoords = CIExyYCoords {
+            coords: self.red,
+            luma: 1.0,
+        }
+        .into();
+        let green: CIEXYZCoords = CIExyYCoords {
+            coords: self.green,
+            luma: 1.0,
+        }
+        .into();
+        let blue: CIEXYZCoords = CIExyYCoords {
+            coords: self.blue,
+            luma: 1.0,
+        }
+        .into();
+        let white: CIEXYZCoords = CIExyYCoords {
+            coords: self.white,
+            luma: 1.0,
+        }
+        .into();
 
-        let s_coefficients = Matrix3x3f::new(red.x, green.x, blue.x, red.y, green.y, blue.y, red.z, green.z, blue.z).try_inverse().unwrap() * Matrix3x1f::from(white);
+        let s_coefficients = Matrix3x3f::new(
+            red.x, green.x, blue.x, red.y, green.y, blue.y, red.z, green.z, blue.z,
+        )
+        .try_inverse()?
+            * Matrix3x1f::from(white);
         let s_r = s_coefficients[(0, 0)];
         let s_g = s_coefficients[(1, 0)];
         let s_b = s_coefficients[(2, 0)];
 
-        Matrix3x3f::new(
+        Some(Matrix3x3f::new(
             s_r * red.x,
             s_g * green.x,
             s_b * blue.x,
@@ -206,27 +230,27 @@ impl Chromaticities {
             s_r * red.z,
             s_g * green.z,
             s_b * blue.z,
-        )
+        ))
     }
 
-    pub fn xyz_to_rgb_matrix(&self) -> Matrix3x3f {
-        self.rgb_to_xyz_matrix().try_inverse().unwrap()
+    pub fn xyz_to_rgb_matrix(&self) -> Option<Matrix3x3f> {
+        self.rgb_to_xyz_matrix()?.try_inverse()
     }
 
     /// Matrix for going from this color space to another one. If destination space is smaller than this one, be careful of output. This matrix comes first in multiplication
-    pub fn rgb_space_conversion_matrix(&self, destination: &Chromaticities) -> Matrix3x3f {
-        destination.xyz_to_rgb_matrix() * self.rgb_to_xyz_matrix()
+    pub fn rgb_space_conversion_matrix(&self, destination: &Chromaticities) -> Option<Matrix3x3f> {
+        Some(destination.xyz_to_rgb_matrix()? * self.rgb_to_xyz_matrix()?)
     }
 
     /// Use to calculate the luminance of a pixel
-    pub fn luminance_values(&self) -> LuminanceCoefficients {
-        let mat = self.rgb_to_xyz_matrix();
+    pub fn luminance_values(&self) -> Option<LuminanceCoefficients> {
+        let mat = self.rgb_to_xyz_matrix()?;
 
-        LuminanceCoefficients {
+        Some(LuminanceCoefficients {
             red: mat[(1, 0)],
             green: mat[(1, 1)],
             blue: mat[(1, 2)],
-        }
+        })
     }
 }
 
