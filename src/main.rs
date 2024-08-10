@@ -6,7 +6,7 @@ use exr::image::read::{image::ReadLayers, layers::ReadChannels, read};
 use nalgebra::SMatrix;
 use png::{Encoder, ScaledFloat};
 
-use color_spaces::{ColorSpace, REC_709};
+use color_spaces::{ColorSpace, Illuminant, REC_709};
 use transfer_functions::gamma;
 
 mod color_spaces;
@@ -25,9 +25,15 @@ struct App {
     /// Manually specify what the linear-light RGB channels refer to
     #[arg(short, long)]
     input_chromaticities: Option<ColorSpace>,
+    /// Manually override the input white point
+    #[arg(long)]
+    input_white: Option<Illuminant>,
     /// What the output will be encoded in. If not specified, will be the same as input
     #[arg(short, long)]
     output_chromaticities: Option<ColorSpace>,
+    /// Manually override the output white point
+    #[arg(long)]
+    output_white: Option<Illuminant>,
     /// Path to scene-referred linear-light OpenEXR image
     exr: PathBuf,
     /// Path to display-referred gamma-encoded PNG image
@@ -48,8 +54,8 @@ fn main() {
         .from_file(args.exr)
         .unwrap();
 
-    // Get chromaticities
-    let input_chromaticities = if let Some(c) = image.attributes.chromaticities {
+    // Get input chromaticities
+    let mut input_chromaticities = if let Some(c) = image.attributes.chromaticities {
         c.into()
     } else if let Some(c) = args.input_chromaticities {
         c.chromaticities()
@@ -57,6 +63,26 @@ fn main() {
         eprintln!("Warning: Assuming Rec. 709 (sRGB) color space for input EXR.");
         REC_709
     };
+
+    // Override input white point
+    if let Some(i) = args.input_white {
+        input_chromaticities.white = i.white();
+    }
+
+    // Get output chromaticities
+    let mut output_chromaticities = args.output_chromaticities.map(|c| c.chromaticities());
+
+    // Override output white point
+    if let Some(i) = args.output_white {
+        if let Some(ch) = &mut output_chromaticities {
+            ch.white = i.white();
+        } else {
+            // Take input chromaticities and change white point, this will lead to a conversion
+            let mut modified = input_chromaticities;
+            modified.white = i.white();
+            output_chromaticities = Some(modified)
+        }
+    }
 
     // Load pixels to own vec
     let width = image.attributes.display_window.size.0;
@@ -75,16 +101,13 @@ fn main() {
     }
 
     // Convert to desired color space
-    if let Some(output) = args.output_chromaticities {
-        if !output
-            .chromaticities()
-            .contains_space(&input_chromaticities)
-        {
+    if let Some(output_chromaticities) = output_chromaticities {
+        if !output_chromaticities.contains_space(&input_chromaticities) {
             eprintln!("Warning: Output color space is smaller than input, check output for any artifacts.")
         }
 
         let conversion_matrix = input_chromaticities
-            .rgb_space_conversion_matrix(&output.chromaticities())
+            .rgb_space_conversion_matrix(&output_chromaticities)
             .unwrap();
         for pixel in &mut linear_light {
             let v: Matrix3x1f = (*pixel).into();
@@ -110,10 +133,7 @@ fn main() {
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_source_gamma(ScaledFloat::new(2.4f32.recip()));
-    let write_chromaticities = args
-        .output_chromaticities
-        .map(|c| c.chromaticities())
-        .unwrap_or(input_chromaticities);
+    let write_chromaticities = output_chromaticities.unwrap_or(input_chromaticities);
     if write_chromaticities.has_negatives() {
         eprint!("Warning: Some output chromaticities have negative values, PNGs clamps these to 0. Color WILL be affected.")
     }

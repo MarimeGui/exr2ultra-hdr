@@ -4,6 +4,23 @@ use crate::color_stuff::{CIExyCoords, Chromaticities};
 
 // -----
 
+#[derive(ValueEnum, Debug, Copy, Clone)]
+pub enum Illuminant {
+    D50,
+    D65,
+    Aces,
+}
+
+impl Illuminant {
+    pub fn white(&self) -> CIExyCoords {
+        match self {
+            Illuminant::D50 => D50_ILLUMINANT,
+            Illuminant::D65 => D65_ILLUMINANT,
+            Illuminant::Aces => ACES_ILLUMINANT,
+        }
+    }
+}
+
 pub const D50_ILLUMINANT: CIExyCoords = CIExyCoords {
     x: 0.34567,
     y: 0.35850,
