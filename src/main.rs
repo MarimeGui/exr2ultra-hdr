@@ -75,9 +75,16 @@ fn main() {
     }
 
     // Convert to desired color space
-    if let Some(output_chromaticities) = args.output_chromaticities {
+    if let Some(output) = args.output_chromaticities {
+        if !output
+            .chromaticities()
+            .contains_space(&input_chromaticities)
+        {
+            eprintln!("Warning: Output color space is smaller than input, check output for any artifacts.")
+        }
+
         let conversion_matrix = input_chromaticities
-            .rgb_space_conversion_matrix(&output_chromaticities.chromaticities())
+            .rgb_space_conversion_matrix(&output.chromaticities())
             .unwrap();
         for pixel in &mut linear_light {
             let v: Matrix3x1f = (*pixel).into();
@@ -103,12 +110,14 @@ fn main() {
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_source_gamma(ScaledFloat::new(2.4f32.recip()));
-    encoder.set_source_chromaticities(
-        args.output_chromaticities
-            .map(|c| c.chromaticities())
-            .unwrap_or(input_chromaticities)
-            .into(),
-    );
+    let write_chromaticities = args
+        .output_chromaticities
+        .map(|c| c.chromaticities())
+        .unwrap_or(input_chromaticities);
+    if write_chromaticities.has_negatives() {
+        eprint!("Warning: Some output chromaticities have negative values, PNGs clamps these to 0. Color WILL be affected.")
+    }
+    encoder.set_source_chromaticities(write_chromaticities.into());
     let mut writer = encoder.write_header().unwrap();
     writer.write_image_data(&image_data).unwrap()
 }

@@ -69,6 +69,10 @@ impl CIExyCoords {
 
         CIExyCoords { x, y }
     }
+
+    pub fn has_negatives(&self) -> bool {
+        self.x.is_sign_negative() | self.y.is_sign_negative()
+    }
 }
 
 impl From<Vec2<f32>> for CIExyCoords {
@@ -249,27 +253,28 @@ impl Chromaticities {
         Some(destination.xyz_to_rgb_matrix()? * self.rgb_to_xyz_matrix()?)
     }
 
-    /// Does this color space cover another color space completely ?
-    pub fn contains(&self, other: &Chromaticities) -> bool {
+    /// Does this color space contain this color ?
+    pub fn contains_color(&self, color: CIExyCoords) -> bool {
         // https://stackoverflow.com/a/2049593
         fn sign(p1: CIExyCoords, p2: CIExyCoords, p3: CIExyCoords) -> f32 {
             (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y)
         }
 
-        fn point_in_triangle(point: CIExyCoords, triangle: Chromaticities) -> bool {
-            let d1 = sign(point, triangle.red, triangle.green);
-            let d2 = sign(point, triangle.green, triangle.blue);
-            let d3 = sign(point, triangle.blue, triangle.red);
+        let d1 = sign(color, self.red, self.green);
+        let d2 = sign(color, self.green, self.blue);
+        let d3 = sign(color, self.blue, self.red);
 
-            let has_neg = (d1 < 0.0) | (d2 < 0.0) | (d3 < 0.0);
-            let has_pos = (d1 > 0.0) | (d2 > 0.0) | (d3 > 0.0);
+        let has_neg = (d1 < 0.0) | (d2 < 0.0) | (d3 < 0.0);
+        let has_pos = (d1 > 0.0) | (d2 > 0.0) | (d3 > 0.0);
 
-            !(has_neg & has_pos)
-        }
+        !(has_neg & has_pos)
+    }
 
-        point_in_triangle(other.red, *self)
-            & point_in_triangle(other.green, *self)
-            & point_in_triangle(other.blue, *self)
+    /// Does this color space cover another color space completely ? Does not take into account white point
+    pub fn contains_space(&self, other: &Chromaticities) -> bool {
+        self.contains_color(other.red)
+            & self.contains_color(other.green)
+            & self.contains_color(other.blue)
     }
 
     /// Use to calculate the luminance of a pixel
@@ -281,6 +286,14 @@ impl Chromaticities {
             green: mat[(1, 1)],
             blue: mat[(1, 2)],
         })
+    }
+
+    /// True if any component is negative
+    pub fn has_negatives(&self) -> bool {
+        self.red.has_negatives()
+            | self.green.has_negatives()
+            | self.blue.has_negatives()
+            | self.white.has_negatives()
     }
 }
 
