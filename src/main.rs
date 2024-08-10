@@ -28,6 +28,9 @@ struct App {
     /// Manually override the input white point
     #[arg(long)]
     input_white: Option<Illuminant>,
+    /// Re-expose the shot by specifying an exposition value (eV)
+    #[arg(short, long, allow_hyphen_values = true)]
+    exposure: Option<f32>,
     /// What the output will be encoded in. If not specified, will be the same as input
     #[arg(short, long)]
     output_chromaticities: Option<ColorSpace>,
@@ -84,6 +87,13 @@ fn main() {
         }
     }
 
+    // Get multiplication factor
+    let factor = if let Some(ev) = args.exposure {
+        2.0f32.powf(ev)
+    } else {
+        1.0
+    };
+
     // Load pixels to own vec
     let width = image.attributes.display_window.size.0;
     let height = image.attributes.display_window.size.1;
@@ -91,11 +101,11 @@ fn main() {
     for channel in image.layer_data.channel_data.list {
         for (index, sample) in channel.sample_data.values_as_f32().enumerate() {
             if channel.name.to_string() == "R" {
-                linear_light[index].r = sample;
+                linear_light[index].r = sample * factor;
             } else if channel.name.to_string() == "G" {
-                linear_light[index].g = sample;
+                linear_light[index].g = sample * factor;
             } else if channel.name.to_string() == "B" {
-                linear_light[index].b = sample;
+                linear_light[index].b = sample * factor;
             }
         }
     }
