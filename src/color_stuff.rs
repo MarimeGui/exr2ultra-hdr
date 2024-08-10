@@ -50,6 +50,25 @@ impl CIExyCoords {
     pub fn with_luma(self, luma: f32) -> CIExyYCoords {
         CIExyYCoords { coords: self, luma }
     }
+
+    // https://en.wikipedia.org/wiki/Standard_illuminant
+    pub fn from_black_body(temperature: f32) -> CIExyCoords {
+        // Not handling below 4000K and above 25000K properly but oh well
+        let x = if temperature <= 7000.0 {
+            0.244063
+                + 0.09911 * 10.0f32.powi(3) * temperature.recip()
+                + 2.9678 * 10.0f32.powi(6) * temperature.powi(2).recip()
+                - 4.6070 * 10.0f32.powi(9) * temperature.powi(3).recip()
+        } else {
+            0.237040
+                + 0.24748 * 10.0f32.powi(3) * temperature.recip()
+                + 1.9018 * 10.0f32.powi(6) * temperature.powi(2).recip()
+                - 2.0064 * 10.0f32.powi(9) * temperature.powi(3).recip()
+        };
+        let y = -3.000 * x.powi(2) + 2.870 * x - 0.275;
+
+        CIExyCoords { x, y }
+    }
 }
 
 impl From<Vec2<f32>> for CIExyCoords {
