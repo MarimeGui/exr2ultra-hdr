@@ -249,6 +249,29 @@ impl Chromaticities {
         Some(destination.xyz_to_rgb_matrix()? * self.rgb_to_xyz_matrix()?)
     }
 
+    /// Does this color space cover another color space completely ?
+    pub fn contains(&self, other: &Chromaticities) -> bool {
+        // https://stackoverflow.com/a/2049593
+        fn sign(p1: CIExyCoords, p2: CIExyCoords, p3: CIExyCoords) -> f32 {
+            (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y)
+        }
+
+        fn point_in_triangle(point: CIExyCoords, triangle: Chromaticities) -> bool {
+            let d1 = sign(point, triangle.red, triangle.green);
+            let d2 = sign(point, triangle.green, triangle.blue);
+            let d3 = sign(point, triangle.blue, triangle.red);
+
+            let has_neg = (d1 < 0.0) | (d2 < 0.0) | (d3 < 0.0);
+            let has_pos = (d1 > 0.0) | (d2 > 0.0) | (d3 > 0.0);
+
+            !(has_neg & has_pos)
+        }
+
+        point_in_triangle(other.red, *self)
+            & point_in_triangle(other.green, *self)
+            & point_in_triangle(other.blue, *self)
+    }
+
     /// Use to calculate the luminance of a pixel
     pub fn luminance_values(&self) -> Option<LuminanceCoefficients> {
         let mat = self.rgb_to_xyz_matrix()?;
