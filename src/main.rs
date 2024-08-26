@@ -73,10 +73,10 @@ fn main() {
         .unwrap();
 
     // Get input chromaticities
-    let mut input_chromaticities = if let Some(c) = image.attributes.chromaticities {
-        c.into()
-    } else if let Some(c) = args.input_chromaticities {
+    let mut input_chromaticities = if let Some(c) = args.input_chromaticities {
         c.chromaticities()
+    } else if let Some(c) = image.attributes.chromaticities {
+        c.into()
     } else {
         eprintln!("Warning: Assuming Rec. 709 (sRGB) color space for input EXR.");
         REC_709
