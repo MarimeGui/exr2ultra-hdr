@@ -7,6 +7,7 @@
 // http://www.brucelindbloom.com/index.html?Eqn_XYZ_to_xyY.html
 
 use exr::math::Vec2;
+use rcms::color::CxyY;
 
 use crate::{Matrix3x1f, Matrix3x3f};
 
@@ -155,6 +156,16 @@ impl From<CIExyYCoords> for CIEXYZCoords {
 pub struct CIExyYCoords {
     pub coords: CIExyCoords,
     pub luma: f32,
+}
+
+impl From<CIExyYCoords> for CxyY {
+    fn from(value: CIExyYCoords) -> Self {
+        CxyY {
+            x: value.coords.x.into(),
+            y: value.coords.y.into(),
+            Y: value.luma.into(),
+        }
+    }
 }
 
 // ----- Chromaticities

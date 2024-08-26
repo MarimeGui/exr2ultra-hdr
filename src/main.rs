@@ -1,17 +1,28 @@
-use std::{fs::File, io::BufWriter, path::PathBuf};
+use std::{
+    fs::File,
+    io::{BufWriter, Cursor},
+    path::PathBuf,
+};
 
 use clap::Parser;
-use color_stuff::Pixel;
 use exr::image::read::{image::ReadLayers, layers::ReadChannels, read};
+use jpeg_encoder::Encoder;
 use nalgebra::SMatrix;
-use png::{Encoder, ScaledFloat};
+use png::{Encoder as PNGEncoder, ScaledFloat};
+use rcms::IccProfile;
 
 use color_spaces::{ColorSpace, Illuminant, REC_709};
-use transfer_functions::gamma;
+use color_stuff::{Chromaticities, Pixel};
+use transfer_functions::gamma as gamma_transfer;
 
 mod color_spaces;
 mod color_stuff;
 mod transfer_functions;
+
+// ----- Constants
+
+const GAMMA: f32 = 2.4;
+const JPEG_QUALITY: u8 = 100;
 
 // ----- Matrix type definitions
 
@@ -37,10 +48,14 @@ struct App {
     /// Manually override the output white point
     #[arg(long)]
     output_white: Option<Illuminant>,
+    /// Write display-referred gamma-encoded output to a PNG file
+    #[arg(long)]
+    png: Option<PathBuf>,
+    /// Write display-referred gamma-encoded output to a JPEG file, with ICC profile embedded
+    #[arg(long)]
+    jpg: Option<PathBuf>,
     /// Path to scene-referred linear-light OpenEXR image
     exr: PathBuf,
-    /// Path to display-referred gamma-encoded PNG image
-    png: PathBuf,
 }
 
 // -----
@@ -128,28 +143,86 @@ fn main() {
     // Apply transfer function and limit to 1.0 (convert to display-referred), convert to u8
     let mut image_data = Vec::with_capacity(width * height);
     for pixel in linear_light {
-        let r = (gamma(pixel.r, 2.4) * 255.0).clamp(0.0, 255.0).round() as u8;
-        let g = (gamma(pixel.g, 2.4) * 255.0).clamp(0.0, 255.0).round() as u8;
-        let b = (gamma(pixel.b, 2.4) * 255.0).clamp(0.0, 255.0).round() as u8;
+        let r = (gamma_transfer(pixel.r, GAMMA) * 255.0)
+            .clamp(0.0, 255.0)
+            .round() as u8;
+        let g = (gamma_transfer(pixel.g, GAMMA) * 255.0)
+            .clamp(0.0, 255.0)
+            .round() as u8;
+        let b = (gamma_transfer(pixel.b, GAMMA) * 255.0)
+            .clamp(0.0, 255.0)
+            .round() as u8;
         image_data.extend([r, g, b])
     }
 
-    // Write to image
-    let mut encoder = Encoder::new(
-        BufWriter::new(File::create(args.png).unwrap()),
+    let write_chromaticities = output_chromaticities.unwrap_or(input_chromaticities);
+
+    // Write PNG image
+    if let Some(png_path) = args.png {
+        encode_png(png_path, &image_data, width, height, write_chromaticities)
+    }
+
+    // Write JPEG image
+    if let Some(jpg_path) = args.jpg {
+        encode_jpeg(jpg_path, &image_data, width, height, write_chromaticities)
+    }
+}
+
+fn encode_png(
+    png_path: PathBuf,
+    image_data: &[u8],
+    width: usize,
+    height: usize,
+    write_chromaticities: Chromaticities,
+) {
+    let mut encoder = PNGEncoder::new(
+        BufWriter::new(File::create(png_path).unwrap()),
         width.try_into().unwrap(),
         height.try_into().unwrap(),
     );
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_source_gamma(ScaledFloat::new(2.4f32.recip()));
-    let write_chromaticities = output_chromaticities.unwrap_or(input_chromaticities);
+    encoder.set_source_gamma(ScaledFloat::new(GAMMA.recip()));
     if write_chromaticities.has_negatives() {
         eprint!("Warning: Some output chromaticities have negative values, PNGs clamps these to 0. Color WILL be affected.")
     }
     encoder.set_source_chromaticities(write_chromaticities.into());
     let mut writer = encoder.write_header().unwrap();
-    writer.write_image_data(&image_data).unwrap()
+    writer.write_image_data(image_data).unwrap();
 }
 
-// TODO: How to embed an ICC profile with my own chromaticities ?
+fn encode_jpeg(
+    jpg_path: PathBuf,
+    image_data: &[u8],
+    width: usize,
+    height: usize,
+    write_chromaticities: Chromaticities,
+) {
+    // Generate ICC profile
+    let mut profile_cursor = Cursor::new(Vec::new());
+    let profile = IccProfile::new_rgb(
+        write_chromaticities.white.with_luma(1.0).into(),
+        (
+            write_chromaticities.red.with_luma(1.0).into(),
+            write_chromaticities.green.with_luma(1.0).into(),
+            write_chromaticities.blue.with_luma(1.0).into(),
+        ),
+        GAMMA.into(),
+    )
+    .unwrap();
+    profile.serialize(&mut profile_cursor).unwrap();
+
+    // Encode image
+    let mut encoder = Encoder::new_file(jpg_path, JPEG_QUALITY).unwrap();
+    encoder
+        .add_icc_profile(&profile_cursor.into_inner())
+        .unwrap();
+    encoder
+        .encode(
+            image_data,
+            width.try_into().unwrap(),
+            height.try_into().unwrap(),
+            jpeg_encoder::ColorType::Rgb,
+        )
+        .unwrap();
+}
