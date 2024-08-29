@@ -59,12 +59,21 @@ struct App {
     /// Manually override the output white point
     #[arg(long)]
     output_white: Option<Illuminant>,
-    /// Write display-referred gamma-encoded output to a PNG file
+    /// Write SDR display-referred gamma-encoded output to a PNG file
     #[arg(long)]
     png: Option<PathBuf>,
-    /// Write display-referred gamma-encoded output to a JPEG file, with ICC profile embedded
+    /// Write Ultra HDR Gain Map to a separate PNG file for diagnostics
+    #[arg(long)]
+    gain_map_png: Option<PathBuf>,
+    /// Write SDR display-referred gamma-encoded output to a JPEG file, with ICC profile embedded
     #[arg(long)]
     jpg: Option<PathBuf>,
+    /// Write display-referred gamma-encoded output to a Ultra HDR-compliant JPEG file
+    #[arg(long)]
+    ultra_hdr_jpg: Option<PathBuf>,
+    /// Write Ultra HDR Gain Map to a separate JPEG file for diagnostics
+    #[arg(long)]
+    gain_map_jpeg: Option<PathBuf>,
     /// Path to scene-referred linear-light OpenEXR image
     exr: PathBuf,
 }
@@ -73,6 +82,8 @@ struct App {
 
 fn main() {
     let args = App::parse();
+
+    // ----- Input
 
     let image = read()
         .no_deep_data()
@@ -128,6 +139,8 @@ fn main() {
             }
         }
     }
+
+    // ----- Process
 
     // Convert to desired color space
     if let Some(output_chromaticities) = output_chromaticities {
@@ -191,16 +204,64 @@ fn main() {
         encoded_recoveries.push((recovery * 255.0).round() as u8)
     }
 
-    // Write PNG image
+    // ----- Output
+
+    // TODO: Could optimize by only encoding JPEGs once
+
+    // Write SDR PNG image
     if let Some(png_path) = args.png {
         encode_png(png_path, &image_data, width, height, write_chromaticities)
     }
 
-    // Write JPEG image
-    if let Some(jpg_path) = args.jpg {
-        // TODO: Implement MPF
-        // Might have to use https://crates.io/crates/img-parts to modify offset
+    // Write Gain Map PNG image
+    if let Some(path) = args.gain_map_png {
+        encode_gain_map_png(path, &encoded_recoveries, width, height)
+    }
 
+    // Generate ICC profile for JPEGs
+    let mut profile_bytes = Cursor::new(Vec::new());
+    let profile = IccProfile::new_rgb(
+        write_chromaticities.white.with_luma(1.0).into(),
+        (
+            write_chromaticities.red.with_luma(1.0).into(),
+            write_chromaticities.green.with_luma(1.0).into(),
+            write_chromaticities.blue.with_luma(1.0).into(),
+        ),
+        GAMMA.into(),
+    )
+    .unwrap();
+    profile.serialize(&mut profile_bytes).unwrap();
+    let profile_bytes = profile_bytes.into_inner();
+
+    // Write SDR JPG image
+    if let Some(jpg_path) = args.jpg {
+        let mut encoder = JPEGEncoder::new_file(jpg_path, JPEG_QUALITY).unwrap();
+        encoder.add_icc_profile(&profile_bytes).unwrap();
+        encoder
+            .encode(
+                &image_data,
+                width.try_into().unwrap(),
+                height.try_into().unwrap(),
+                jpeg_encoder::ColorType::Rgb,
+            )
+            .unwrap();
+    }
+
+    // Write Gain Map JPEG image
+    if let Some(path) = args.gain_map_jpeg {
+        let gain_map_encoder = JPEGEncoder::new_file(path, MAP_JPEG_QUALITY).unwrap();
+        gain_map_encoder
+            .encode(
+                &encoded_recoveries,
+                width.try_into().unwrap(),
+                height.try_into().unwrap(),
+                jpeg_encoder::ColorType::Luma,
+            )
+            .unwrap();
+    }
+
+    // Write HDR JPEG image
+    if let Some(jpg_path) = args.ultra_hdr_jpg {
         // Create new file
         let mut write_file = BufWriter::new(File::create(jpg_path).unwrap());
 
@@ -240,25 +301,9 @@ fn main() {
         .render()
         .unwrap();
 
-        // Generate ICC profile
-        let mut profile_bytes = Cursor::new(Vec::new());
-        let profile = IccProfile::new_rgb(
-            write_chromaticities.white.with_luma(1.0).into(),
-            (
-                write_chromaticities.red.with_luma(1.0).into(),
-                write_chromaticities.green.with_luma(1.0).into(),
-                write_chromaticities.blue.with_luma(1.0).into(),
-            ),
-            GAMMA.into(),
-        )
-        .unwrap();
-        profile.serialize(&mut profile_bytes).unwrap();
-
         // Encode main image
         let mut main_encoder = JPEGEncoder::new(&mut write_file, JPEG_QUALITY);
-        main_encoder
-            .add_icc_profile(&profile_bytes.into_inner())
-            .unwrap();
+        main_encoder.add_icc_profile(&profile_bytes).unwrap();
         main_encoder
             .add_app_segment(1, &make_xmp(directory_xmp))
             .unwrap();
@@ -307,6 +352,19 @@ fn process_pixel(linear_value: f32, factor: f32, gamma: f32) -> u8 {
     (gamma_transfer(linear_value * factor, gamma) * 255.0)
         .clamp(0.0, 255.0)
         .round() as u8
+}
+
+fn encode_gain_map_png(png_path: PathBuf, image_data: &[u8], width: usize, height: usize) {
+    let mut encoder = PNGEncoder::new(
+        BufWriter::new(File::create(png_path).unwrap()),
+        width.try_into().unwrap(),
+        height.try_into().unwrap(),
+    );
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_source_gamma(ScaledFloat::new(MAP_GAMMA.recip()));
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(image_data).unwrap();
 }
 
 fn encode_png(
