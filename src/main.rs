@@ -1,28 +1,39 @@
 use std::{
     fs::File,
-    io::{BufWriter, Cursor},
+    io::{BufWriter, Cursor, Write},
     path::PathBuf,
 };
 
+use askama::Template;
 use clap::Parser;
 use exr::image::read::{image::ReadLayers, layers::ReadChannels, read};
-use jpeg_encoder::Encoder;
+use jpeg_encoder::Encoder as JPEGEncoder;
 use nalgebra::SMatrix;
 use png::{Encoder as PNGEncoder, ScaledFloat};
 use rcms::IccProfile;
 
 use color_spaces::{ColorSpace, Illuminant, REC_709};
-use color_stuff::{Chromaticities, Pixel};
+use color_stuff::{Chromaticities, LuminanceCoefficients, Pixel};
 use transfer_functions::gamma as gamma_transfer;
+use ultra_hdr_stuff::{make_xmp, GContainerTemplate, HDRGainMapMetadataTemplate, BOGUS_MPF_HEADER};
 
 mod color_spaces;
 mod color_stuff;
 mod transfer_functions;
+mod ultra_hdr_stuff;
 
 // ----- Constants
 
 const GAMMA: f32 = 2.4;
 const JPEG_QUALITY: u8 = 100;
+/// Gain Map SDR offset
+const OFFSET_SDR: f32 = 1.0 / 64.0;
+/// Gain Map HDR offset
+const OFFSET_HDR: f32 = 1.0 / 64.0;
+/// Gamma value used for encoding Gain Map to JPEG
+const MAP_GAMMA: f32 = 1.0;
+/// JPEG Quality of Gain Map
+const MAP_JPEG_QUALITY: u8 = 100;
 
 // ----- Matrix type definitions
 
@@ -102,13 +113,6 @@ fn main() {
         }
     }
 
-    // Get multiplication factor
-    let factor = if let Some(ev) = args.exposure {
-        2.0f32.powf(ev)
-    } else {
-        1.0
-    };
-
     // Load pixels to own vec
     let width = image.attributes.display_window.size.0;
     let height = image.attributes.display_window.size.1;
@@ -116,11 +120,11 @@ fn main() {
     for channel in image.layer_data.channel_data.list {
         for (index, sample) in channel.sample_data.values_as_f32().enumerate() {
             if channel.name.to_string() == "R" {
-                linear_light[index].r = sample * factor;
+                linear_light[index].r = sample;
             } else if channel.name.to_string() == "G" {
-                linear_light[index].g = sample * factor;
+                linear_light[index].g = sample;
             } else if channel.name.to_string() == "B" {
-                linear_light[index].b = sample * factor;
+                linear_light[index].b = sample;
             }
         }
     }
@@ -140,22 +144,52 @@ fn main() {
         }
     }
 
-    // Apply transfer function and limit to 1.0 (convert to display-referred), convert to u8
+    let write_chromaticities = output_chromaticities.unwrap_or(input_chromaticities);
+
+    // Get multiplication factor
+    let factor = if let Some(ev) = args.exposure {
+        2.0f32.powf(ev)
+    } else {
+        1.0
+    };
+
+    // Apply transfer function and limit to 1.0 (convert to display-referred) and convert to u8, all while calculating gain map
     let mut image_data = Vec::with_capacity(width * height);
+    let mut pixel_gains = Vec::with_capacity(width * height);
+    let coefficients = write_chromaticities.luminance_values().unwrap();
     for pixel in linear_light {
-        let r = (gamma_transfer(pixel.r, GAMMA) * 255.0)
-            .clamp(0.0, 255.0)
-            .round() as u8;
-        let g = (gamma_transfer(pixel.g, GAMMA) * 255.0)
-            .clamp(0.0, 255.0)
-            .round() as u8;
-        let b = (gamma_transfer(pixel.b, GAMMA) * 255.0)
-            .clamp(0.0, 255.0)
-            .round() as u8;
+        pixel_gains.push(calculate_gain(
+            &pixel,
+            factor,
+            &coefficients,
+            OFFSET_HDR,
+            OFFSET_SDR,
+        ));
+
+        let r = process_pixel(pixel.r, factor, GAMMA);
+        let g = process_pixel(pixel.g, factor, GAMMA);
+        let b = process_pixel(pixel.b, factor, GAMMA);
         image_data.extend([r, g, b])
     }
 
-    let write_chromaticities = output_chromaticities.unwrap_or(input_chromaticities);
+    // Compute encoded gain map, as specified in Google documentation
+    let min_content_boost = pixel_gains
+        .iter()
+        .min_by(|x, y| x.partial_cmp(y).unwrap())
+        .unwrap();
+    let max_content_boost = pixel_gains
+        .iter()
+        .max_by(|x, y| x.partial_cmp(y).unwrap())
+        .unwrap();
+    let map_min_log2 = min_content_boost.log2();
+    let map_max_log2 = max_content_boost.log2();
+    let mut encoded_recoveries = Vec::with_capacity(width * height);
+    for pixel_gain in pixel_gains {
+        let log_recovery = (pixel_gain.log2() - map_min_log2) / (map_max_log2 - map_min_log2);
+        let clamped_recovery = log_recovery.clamp(0.0, 1.0);
+        let recovery = clamped_recovery.powf(MAP_GAMMA);
+        encoded_recoveries.push((recovery * 255.0).round() as u8)
+    }
 
     // Write PNG image
     if let Some(png_path) = args.png {
@@ -164,8 +198,115 @@ fn main() {
 
     // Write JPEG image
     if let Some(jpg_path) = args.jpg {
-        encode_jpeg(jpg_path, &image_data, width, height, write_chromaticities)
+        // TODO: Implement MPF
+        // Might have to use https://crates.io/crates/img-parts to modify offset
+
+        // Create new file
+        let mut write_file = BufWriter::new(File::create(jpg_path).unwrap());
+
+        // Gen Gain Map XMP data
+        let hdr_xmp = HDRGainMapMetadataTemplate {
+            gain_map_min: map_min_log2,
+            gain_map_max: map_max_log2,
+            gamma: MAP_GAMMA,
+            offset_sdr: OFFSET_SDR,
+            offset_hdr: OFFSET_HDR,
+            hdr_capacity_min: map_min_log2,
+            hdr_capacity_max: map_max_log2,
+        }
+        .render()
+        .unwrap();
+
+        // Encode gain map image
+        let mut gain_map_image_bytes = Cursor::new(Vec::new());
+        let mut gain_map_encoder = JPEGEncoder::new(&mut gain_map_image_bytes, MAP_JPEG_QUALITY);
+        gain_map_encoder
+            .add_app_segment(1, &make_xmp(hdr_xmp))
+            .unwrap();
+        gain_map_encoder
+            .encode(
+                &encoded_recoveries,
+                width.try_into().unwrap(),
+                height.try_into().unwrap(),
+                jpeg_encoder::ColorType::Luma,
+            )
+            .unwrap();
+        let gain_map_image_bytes = gain_map_image_bytes.into_inner();
+
+        // Gen directory XMP
+        let directory_xmp = GContainerTemplate {
+            gain_map_image_len: gain_map_image_bytes.len(),
+        }
+        .render()
+        .unwrap();
+
+        // Generate ICC profile
+        let mut profile_bytes = Cursor::new(Vec::new());
+        let profile = IccProfile::new_rgb(
+            write_chromaticities.white.with_luma(1.0).into(),
+            (
+                write_chromaticities.red.with_luma(1.0).into(),
+                write_chromaticities.green.with_luma(1.0).into(),
+                write_chromaticities.blue.with_luma(1.0).into(),
+            ),
+            GAMMA.into(),
+        )
+        .unwrap();
+        profile.serialize(&mut profile_bytes).unwrap();
+
+        // Encode main image
+        let mut main_encoder = JPEGEncoder::new(&mut write_file, JPEG_QUALITY);
+        main_encoder
+            .add_icc_profile(&profile_bytes.into_inner())
+            .unwrap();
+        main_encoder
+            .add_app_segment(1, &make_xmp(directory_xmp))
+            .unwrap();
+        // Add wrong MPF header, file still works in Chrome though
+        main_encoder.add_app_segment(2, BOGUS_MPF_HEADER).unwrap();
+        main_encoder
+            .encode(
+                &image_data,
+                width.try_into().unwrap(),
+                height.try_into().unwrap(),
+                jpeg_encoder::ColorType::Rgb,
+            )
+            .unwrap();
+
+        // Put gain map image next
+        write_file.write_all(&gain_map_image_bytes).unwrap()
     }
+}
+
+/// Compute gain value for this pixel, used to build gain map for Ultra HDR JPEG
+fn calculate_gain(
+    pixel: &Pixel,
+    factor: f32,
+    coefficients: &LuminanceCoefficients,
+    offset_hdr: f32,
+    offset_sdr: f32,
+) -> f32 {
+    let hdr_luminance =
+        pixel.r * coefficients.red + pixel.g * coefficients.green + pixel.b * coefficients.blue;
+
+    let sdr_pixel = Pixel {
+        r: (pixel.r * factor).clamp(0.0, 1.0),
+        g: (pixel.g * factor).clamp(0.0, 1.0),
+        b: (pixel.b * factor).clamp(0.0, 1.0),
+    };
+
+    let sdr_luminance = sdr_pixel.r * coefficients.red
+        + sdr_pixel.g * coefficients.green
+        + sdr_pixel.b * coefficients.blue;
+
+    (hdr_luminance + offset_hdr) / (sdr_luminance + offset_sdr)
+}
+
+/// Go from scene-referred linear light value to scene-referred gamma-encoded u8 pixel component
+fn process_pixel(linear_value: f32, factor: f32, gamma: f32) -> u8 {
+    (gamma_transfer(linear_value * factor, gamma) * 255.0)
+        .clamp(0.0, 255.0)
+        .round() as u8
 }
 
 fn encode_png(
@@ -189,40 +330,4 @@ fn encode_png(
     encoder.set_source_chromaticities(write_chromaticities.into());
     let mut writer = encoder.write_header().unwrap();
     writer.write_image_data(image_data).unwrap();
-}
-
-fn encode_jpeg(
-    jpg_path: PathBuf,
-    image_data: &[u8],
-    width: usize,
-    height: usize,
-    write_chromaticities: Chromaticities,
-) {
-    // Generate ICC profile
-    let mut profile_cursor = Cursor::new(Vec::new());
-    let profile = IccProfile::new_rgb(
-        write_chromaticities.white.with_luma(1.0).into(),
-        (
-            write_chromaticities.red.with_luma(1.0).into(),
-            write_chromaticities.green.with_luma(1.0).into(),
-            write_chromaticities.blue.with_luma(1.0).into(),
-        ),
-        GAMMA.into(),
-    )
-    .unwrap();
-    profile.serialize(&mut profile_cursor).unwrap();
-
-    // Encode image
-    let mut encoder = Encoder::new_file(jpg_path, JPEG_QUALITY).unwrap();
-    encoder
-        .add_icc_profile(&profile_cursor.into_inner())
-        .unwrap();
-    encoder
-        .encode(
-            image_data,
-            width.try_into().unwrap(),
-            height.try_into().unwrap(),
-            jpeg_encoder::ColorType::Rgb,
-        )
-        .unwrap();
 }
