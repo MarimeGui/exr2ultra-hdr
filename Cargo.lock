@@ -320,7 +320,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "exr_read"
+name = "exr2ultra-hdr"
 version = "0.1.0"
 dependencies = [
  "askama",
